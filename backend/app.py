@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sqlite3
+import subprocess
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -67,10 +69,48 @@ class SummonRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ToolRunRequest(BaseModel):
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class StepDefinition(BaseModel):
     name: str
     worker: str
     action: str
+
+
+READ_ONLY_COMPOSIO_TOOLS = [
+    {
+        "id": "gmail.fetch",
+        "name": "Gmail Fetch",
+        "action": "GMAIL_FETCH_EMAILS",
+        "description": "Read recent Gmail messages through Composio.",
+        "default_payload": {
+            "query": "newer_than:7d",
+            "max_results": 5,
+            "include_payload": True,
+            "verbose": True,
+            "user_id": "me",
+        },
+        "triggers": ["email", "gmail", "inbox", "mail"],
+        "mutating": False,
+    },
+    {
+        "id": "gmail.search_unread",
+        "name": "Unread Gmail Search",
+        "action": "GMAIL_FETCH_EMAILS",
+        "description": "Read unread Gmail messages that may need follow-up.",
+        "default_payload": {
+            "query": "is:unread newer_than:14d",
+            "max_results": 10,
+            "include_payload": True,
+            "verbose": True,
+            "user_id": "me",
+        },
+        "triggers": ["unread", "follow up", "follow-up"],
+        "mutating": False,
+    },
+]
 
 
 class SQLiteStore:
@@ -142,6 +182,17 @@ class SQLiteStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_type TEXT NOT NULL,
                     payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS integration_runs (
+                    id TEXT PRIMARY KEY,
+                    tool_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    input TEXT NOT NULL,
+                    output TEXT,
+                    error TEXT,
                     created_at TEXT NOT NULL
                 );
                 """
@@ -260,6 +311,46 @@ class SQLiteStore:
             ).fetchall()
         return [self._decode_row(row) for row in rows]
 
+    def add_integration_run(
+        self,
+        tool_id: str,
+        action: str,
+        payload: dict[str, Any],
+        status: str,
+        output: dict[str, Any] | str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        run_id = str(uuid4())
+        now = utc_now()
+        output_json = json.dumps(output) if output is not None else None
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO integration_runs (id, tool_id, action, status, input, output, error, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, tool_id, action, status, json.dumps(payload), output_json, error, now),
+            )
+            self._insert_event(
+                conn,
+                "integration.run",
+                {"integration_run_id": run_id, "tool_id": tool_id, "status": status},
+            )
+        return self.get_integration_run(run_id)  # type: ignore[return-value]
+
+    def get_integration_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM integration_runs WHERE id = ?", (run_id,)).fetchone()
+        return self._decode_row(row) if row else None
+
+    def list_integration_runs(self, limit: int = 12) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM integration_runs ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._decode_row(row) for row in rows]
+
     def briefing(self) -> dict[str, Any]:
         runs = self.list_runs()
         agents = self.list_agents()
@@ -286,6 +377,111 @@ class SQLiteStore:
             if key in result and isinstance(result[key], str):
                 result[key] = json.loads(result[key])
         return result
+
+
+class ComposioToolRunner:
+    def __init__(
+        self,
+        store: SQLiteStore,
+        cli_path: str | None = None,
+        timeout_seconds: int | None = None,
+    ):
+        self.store = store
+        self.cli_path = cli_path or os.getenv("COMPOSIO_CLI_PATH") or "~/.composio/composio"
+        self.timeout_seconds = timeout_seconds or int(os.getenv("COMPOSIO_TIMEOUT_SECONDS", "30"))
+        self._tools = {tool["id"]: tool for tool in READ_ONLY_COMPOSIO_TOOLS}
+
+    @property
+    def resolved_cli_path(self) -> str | None:
+        expanded = os.path.expanduser(self.cli_path)
+        if Path(expanded).exists():
+            return expanded
+        return shutil.which(self.cli_path)
+
+    def status(self) -> dict[str, Any]:
+        cli = self.resolved_cli_path
+        return {
+            "enabled": os.getenv("COMPOSIO_ENABLED", "1") != "0",
+            "available": bool(cli),
+            "cli_path": cli or self.cli_path,
+            "tools": list(self._tools.values()),
+            "recent_runs": self.store.list_integration_runs(),
+        }
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        return list(self._tools.values())
+
+    def tool_for_message(self, message: str) -> dict[str, Any] | None:
+        lowered = message.lower()
+        for tool in self._tools.values():
+            if any(trigger in lowered for trigger in tool["triggers"]):
+                return tool
+        return None
+
+    def execute(self, tool_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if os.getenv("COMPOSIO_ENABLED", "1") == "0":
+            raise HTTPException(status_code=503, detail="Composio integration is disabled")
+
+        tool = self._tools.get(tool_id)
+        if tool is None:
+            raise HTTPException(status_code=404, detail="tool not found")
+        if tool.get("mutating"):
+            raise HTTPException(status_code=403, detail="mutating tools require an explicit approval flow")
+
+        cli = self.resolved_cli_path
+        if not cli:
+            result = self.store.add_integration_run(
+                tool_id=tool_id,
+                action=tool["action"],
+                payload=payload or tool["default_payload"],
+                status="error",
+                error="Composio CLI not found. Set COMPOSIO_CLI_PATH or install ~/.composio/composio.",
+            )
+            return result
+
+        merged_payload = {**tool["default_payload"], **(payload or {})}
+        command = [cli, "execute", tool["action"], "-d", json.dumps(merged_payload)]
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            return self.store.add_integration_run(
+                tool_id=tool_id,
+                action=tool["action"],
+                payload=merged_payload,
+                status="error",
+                error=f"Composio command timed out after {self.timeout_seconds}s",
+            )
+
+        raw_output = completed.stdout.strip()
+        parsed_output: dict[str, Any] | str
+        try:
+            parsed_output = json.loads(raw_output) if raw_output else {}
+        except json.JSONDecodeError:
+            parsed_output = raw_output
+
+        if completed.returncode != 0:
+            return self.store.add_integration_run(
+                tool_id=tool_id,
+                action=tool["action"],
+                payload=merged_payload,
+                status="error",
+                output=parsed_output,
+                error=completed.stderr.strip() or f"Composio exited with {completed.returncode}",
+            )
+
+        return self.store.add_integration_run(
+            tool_id=tool_id,
+            action=tool["action"],
+            payload=merged_payload,
+            status="completed",
+            output=parsed_output,
+        )
 
 
 class InternalStateGraph:
@@ -315,8 +511,9 @@ class Orchestrator:
         StepDefinition(name="synthesize", worker="Research Analyst", action="Summarize outcome"),
     ]
 
-    def __init__(self, store: SQLiteStore):
+    def __init__(self, store: SQLiteStore, tools: ComposioToolRunner):
         self.store = store
+        self.tools = tools
         self.graph = InternalStateGraph()
         for step in self.steps:
             self.graph.add_node(step.name, self._make_handler(step))
@@ -397,9 +594,14 @@ class Orchestrator:
                 routed.append("Research Analyst")
             return {"routed_agents": routed}
         if step.name == "execute workers":
+            tool = self.tools.tool_for_message(message)
+            tool_result = None
+            if tool:
+                tool_result = self.tools.execute(tool["id"])
             return {
-                "result": "Workers executed in deterministic local mode.",
-                "side_effects": [],
+                "result": "Workers executed with real Composio tools when a matching read-only tool was requested.",
+                "tool_results": [tool_result] if tool_result else [],
+                "side_effects": ["composio.read"] if tool_result else [],
             }
         return {
             "summary": f"Summon processed through {len(self.steps)} steps for source '{state['source']}'.",
@@ -410,7 +612,8 @@ class Orchestrator:
 def create_app(db_path: str | Path | None = None) -> FastAPI:
     selected_db = db_path or os.getenv("AGENTOS_DB_PATH") or DEFAULT_DB_PATH
     store = SQLiteStore(selected_db)
-    orchestrator = Orchestrator(store)
+    tool_runner = ComposioToolRunner(store)
+    orchestrator = Orchestrator(store, tool_runner)
     api = FastAPI(title="Personal AgentOS API", version="0.1.0")
     api.add_middleware(
         CORSMiddleware,
@@ -420,6 +623,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     api.state.store = store
+    api.state.tools = tool_runner
     api.state.orchestrator = orchestrator
 
     @api.get("/health")
@@ -428,6 +632,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             "status": "ok",
             "database": str(store.db_path),
             "langgraph_available": LANGGRAPH_AVAILABLE,
+            "composio": tool_runner.status(),
         }
 
     @api.get("/api/agents")
@@ -463,6 +668,14 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
     @api.get("/api/briefing")
     def briefing() -> dict[str, Any]:
         return store.briefing()
+
+    @api.get("/api/tools")
+    def tools() -> dict[str, Any]:
+        return tool_runner.status()
+
+    @api.post("/api/tools/{tool_id}/execute", status_code=201)
+    def execute_tool(tool_id: str, request: ToolRunRequest) -> dict[str, Any]:
+        return tool_runner.execute(tool_id=tool_id, payload=request.payload)
 
     @api.get("/api/dashboard")
     def dashboard() -> dict[str, Any]:
@@ -502,7 +715,12 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
                 {"label": "Live Agents", "value": str(len(agents)), "delta": "local-first", "tone": "ok"},
                 {"label": "Runs Completed", "value": str(completed), "delta": f"{len(runs)} total", "tone": "neutral"},
                 {"label": "State Graph", "value": "5", "delta": "steps/run", "tone": "ok"},
-                {"label": "Mode", "value": "Local", "delta": "SQLite", "tone": "neutral"},
+                {
+                    "label": "Composio",
+                    "value": "Live" if tool_runner.status()["available"] else "Offline",
+                    "delta": "read-only tools",
+                    "tone": "ok" if tool_runner.status()["available"] else "warn",
+                },
             ],
             "agents": agent_cards,
             "timeline": timeline,
@@ -537,6 +755,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
                     {"label": step["name"].title(), "state": "complete"} for step in latest["steps"]
                 ] if latest else [{"label": "Await Summon", "state": "pending"}],
             },
+            "tools": tool_runner.status(),
         }
 
     @api.get("/api/events/stream")

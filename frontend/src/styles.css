@@ -286,6 +286,30 @@ h1 {
   box-shadow: 0 0 36px rgba(0, 229, 255, 0.12);
 }
 
+.action-state {
+  position: relative;
+  z-index: 1;
+  width: fit-content;
+  margin-top: 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.action-state.completed {
+  color: var(--green);
+  border-color: rgba(84, 240, 164, 0.3);
+}
+
+.action-state.failed {
+  color: var(--amber);
+  border-color: rgba(246, 200, 95, 0.34);
+}
+
 .prompt {
   color: var(--accent);
   font-family: var(--mono);
@@ -467,9 +491,16 @@ h1 {
 .content-grid,
 .lower-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(360px, 0.8fr);
   gap: 18px;
   margin-top: 18px;
+}
+
+.content-grid {
+  grid-template-columns: minmax(0, 1.2fr) minmax(360px, 0.8fr);
+}
+
+.lower-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.72fr) minmax(320px, 0.72fr);
 }
 
 .panel {
@@ -644,6 +675,104 @@ h1 {
 .followup:first-of-type { border-top: 0; }
 .followup strong, .followup span { display: block; }
 .followup span, .followup small { color: var(--muted); }
+
+.tool-panel {
+  min-width: 0;
+}
+
+.tool-status {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.tool-status span {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+
+.tool-status small,
+.tool-card span,
+.tool-runs p,
+.tool-runs small {
+  color: var(--muted);
+}
+
+.tool-status.online span { color: var(--green); }
+.tool-status.offline span { color: var(--amber); }
+
+.tool-list {
+  display: grid;
+  gap: 10px;
+}
+
+.tool-card {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.tool-card strong,
+.tool-card span {
+  display: block;
+}
+
+.tool-card strong {
+  margin-bottom: 4px;
+}
+
+.tool-card button {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 11px;
+  border: 1px solid var(--accent);
+  color: #001014;
+  background: var(--accent);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.tool-card button:disabled {
+  cursor: not-allowed;
+  border-color: var(--border);
+  color: var(--dim);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.tool-runs {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.tool-runs div {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+
+.tool-runs span {
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.tool-runs span.completed { color: var(--green); }
+.tool-runs span.error { color: var(--amber); }
 
 .inspector-core {
   display: grid;

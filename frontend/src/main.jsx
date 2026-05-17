@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import './styles.css';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 const mockDashboard = {
   metrics: [
@@ -66,6 +66,16 @@ const mockDashboard = {
       { label: 'Worker tasks dispatched', state: 'active' },
       { label: 'User approval gates pending', state: 'pending' }
     ]
+  },
+  tools: {
+    enabled: true,
+    available: false,
+    cli_path: '~/.composio/composio',
+    tools: [
+      { id: 'gmail.fetch', name: 'Gmail Fetch', description: 'Read recent Gmail messages through Composio.' },
+      { id: 'gmail.search_unread', name: 'Unread Gmail Search', description: 'Read unread Gmail messages that may need follow-up.' }
+    ],
+    recent_runs: []
   }
 };
 
@@ -94,7 +104,8 @@ function normalizeDashboard(data) {
     agents: data.agents?.length ? data.agents : mockDashboard.agents,
     timeline: data.timeline?.length ? data.timeline : mockDashboard.timeline,
     briefing: data.briefing || mockDashboard.briefing,
-    run: data.run || data.selectedRun || mockDashboard.run
+    run: data.run || data.selectedRun || mockDashboard.run,
+    tools: data.tools || mockDashboard.tools
   };
 }
 
@@ -103,6 +114,8 @@ function App() {
   const [source, setSource] = useState('mock');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState(mockDashboard.agents[0].id);
+  const [command, setCommand] = useState('');
+  const [summonStatus, setSummonStatus] = useState('');
 
   useEffect(() => {
     let alive = true;
@@ -120,6 +133,47 @@ function App() {
     [dashboard.agents, selectedAgentId]
   );
 
+  async function refreshDashboard() {
+    const result = await fetchDashboard();
+    setDashboard(result.data);
+    setSource(result.source);
+  }
+
+  async function handleSummon(event) {
+    event.preventDefault();
+    const message = command.trim() || 'Open the AgentOps dashboard and check connected tools.';
+    setSummonStatus('running');
+    try {
+      const response = await fetch(API_URL + '/api/summon', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'dashboard', message, metadata: { ui: true } })
+      });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      setCommand('');
+      setSummonStatus('completed');
+      await refreshDashboard();
+    } catch {
+      setSummonStatus('failed');
+    }
+  }
+
+  async function executeTool(toolId) {
+    setSummonStatus('running');
+    try {
+      const response = await fetch(API_URL + '/api/tools/' + toolId + '/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payload: {} })
+      });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      setSummonStatus('completed');
+      await refreshDashboard();
+    } catch {
+      setSummonStatus('failed');
+    }
+  }
+
   return (
     <div className="shell">
       <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
@@ -130,12 +184,13 @@ function App() {
             <div className="eyebrow"><RadioTower size={16} /> Personal AgentOS / Jarvis</div>
             <h1>AgentOps command center for your personal AI workforce.</h1>
             <p>Monitor live agents, inspect runs, track cost pressure, and keep the daily operating loop visible.</p>
-            <div className="summon-bar" role="search">
+            <form className="summon-bar" onSubmit={handleSummon}>
               <Command size={20} />
               <span className="prompt">Summon:</span>
-              <input aria-label="Summon command" placeholder="brief me, route tasks, inspect runs..." />
-              <button type="button"><Sparkles size={18} /> Execute</button>
-            </div>
+              <input aria-label="Summon command" placeholder="check gmail, brief me, route tasks..." value={command} onChange={(event) => setCommand(event.target.value)} />
+              <button type="submit"><Sparkles size={18} /> Execute</button>
+            </form>
+            {summonStatus && <div className={'action-state ' + summonStatus}>{summonStatus}</div>}
           </div>
           <RunDetail run={dashboard.run} />
         </section>
@@ -156,6 +211,7 @@ function App() {
         </section>
         <section className="lower-grid">
           <Briefing briefing={dashboard.briefing} />
+          <ToolPanel tools={dashboard.tools} onExecute={executeTool} />
           <AgentInspector agent={selectedAgent} />
         </section>
       </main>
@@ -249,6 +305,43 @@ function Briefing({ briefing }) {
 
 function BriefingColumn({ icon: Icon, title, items }) {
   return <div className="briefing-column"><h3><Icon size={17} /> {title}</h3>{items.map((item) => (<p key={item}><ChevronRight size={15} /> {item}</p>))}</div>;
+}
+
+function ToolPanel({ tools, onExecute }) {
+  const available = tools?.available;
+  const recentRuns = tools?.recent_runs || [];
+  return (
+    <section className="panel tool-panel reveal">
+      <PanelHeader icon={ServerCog} title="Composio Tools" action={available ? 'CLI connected' : 'CLI offline'} />
+      <div className={'tool-status ' + (available ? 'online' : 'offline')}>
+        <span>{available ? 'Connected' : 'Waiting for local Composio CLI'}</span>
+        <small>{tools?.cli_path}</small>
+      </div>
+      <div className="tool-list">
+        {(tools?.tools || []).map((tool) => (
+          <article className="tool-card" key={tool.id}>
+            <div>
+              <strong>{tool.name}</strong>
+              <span>{tool.description}</span>
+            </div>
+            <button type="button" onClick={() => onExecute(tool.id)} disabled={!available}>
+              <Zap size={15} /> Run
+            </button>
+          </article>
+        ))}
+      </div>
+      <div className="tool-runs">
+        {recentRuns.slice(0, 4).map((run) => (
+          <div key={run.id}>
+            <span className={run.status}>{run.status}</span>
+            <strong>{run.tool_id}</strong>
+            <small>{run.created_at?.slice(11, 16)}</small>
+          </div>
+        ))}
+        {!recentRuns.length && <p>No Composio tool runs yet.</p>}
+      </div>
+    </section>
+  );
 }
 
 function RunDetail({ run }) {

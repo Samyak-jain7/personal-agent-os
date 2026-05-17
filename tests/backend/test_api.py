@@ -103,6 +103,58 @@ def test_dashboard_payload_has_frontend_contract(tmp_path):
     assert dashboard["timeline"]
     assert dashboard["briefing"]["followUps"]
     assert dashboard["run"]["id"] != "no_runs_yet"
+    assert dashboard["tools"]["tools"]
+
+
+def test_composio_tool_status_and_execution_with_fake_cli(tmp_path, monkeypatch):
+    fake_cli = tmp_path / "composio"
+    fake_cli.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '{\"ok\":true,\"action\":\"%s\"}' \"$2\"\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+    monkeypatch.setenv("COMPOSIO_CLI_PATH", str(fake_cli))
+
+    api = client(tmp_path)
+
+    tools = api.get("/api/tools")
+    assert tools.status_code == 200
+    assert tools.json()["available"] is True
+
+    response = api.post(
+        "/api/tools/gmail.fetch/execute",
+        json={"payload": {"query": "from:test@example.com", "max_results": 1}},
+    )
+
+    assert response.status_code == 201
+    run = response.json()
+    assert run["status"] == "completed"
+    assert run["tool_id"] == "gmail.fetch"
+    assert run["input"]["query"] == "from:test@example.com"
+    assert run["output"]["ok"] is True
+
+
+def test_summon_can_call_matching_read_only_composio_tool(tmp_path, monkeypatch):
+    fake_cli = tmp_path / "composio"
+    fake_cli.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '{\"messages\":[{\"subject\":\"Interview update\"}]}'\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+    monkeypatch.setenv("COMPOSIO_CLI_PATH", str(fake_cli))
+
+    api = client(tmp_path)
+    response = api.post(
+        "/api/summon",
+        json={"source": "telegram", "message": "Check my unread Gmail follow-ups"},
+    )
+
+    assert response.status_code == 201
+    run = response.json()
+    execute_step = next(step for step in run["steps"] if step["name"] == "execute workers")
+    assert execute_step["output"]["tool_results"][0]["status"] == "completed"
 
 
 def test_missing_run_returns_404(tmp_path):

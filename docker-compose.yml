@@ -7,10 +7,14 @@ services:
       BACKEND_HOST: ${BACKEND_HOST:-0.0.0.0}
       BACKEND_PORT: ${BACKEND_PORT:-8000}
       PORT: ${BACKEND_PORT:-8000}
+      COMPOSIO_ENABLED: ${COMPOSIO_ENABLED:-1}
+      COMPOSIO_CLI_PATH: ${COMPOSIO_CLI_PATH:-/root/.composio/composio}
+      COMPOSIO_TIMEOUT_SECONDS: ${COMPOSIO_TIMEOUT_SECONDS:-30}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./backend:/app/backend
+      - ${HOME}/.composio:/root/.composio:ro
     healthcheck:
       test:
         [
