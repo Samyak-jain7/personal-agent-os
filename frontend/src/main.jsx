@@ -9,7 +9,29 @@ import {
 } from 'lucide-react';
 import './styles.css';
 
-const API_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+function resolveApiUrl() {
+  const configured = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL;
+  if (configured) {
+    try {
+      const url = new URL(configured);
+      if (typeof window !== 'undefined' && url.hostname === 'localhost' && window.location.hostname === '127.0.0.1') {
+        url.hostname = '127.0.0.1';
+        return url.origin;
+      }
+      return url.origin;
+    } catch {
+      return configured.replace(/\/$/, '');
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    return `${window.location.protocol}//${window.location.hostname || 'localhost'}:8000`;
+  }
+
+  return 'http://localhost:8000';
+}
+
+const API_URL = resolveApiUrl();
 
 const mockDashboard = {
   metrics: [
@@ -88,11 +110,38 @@ async function fetchDashboard() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     return { data: normalizeDashboard(data), source: 'backend' };
-  } catch {
-    return { data: mockDashboard, source: 'mock' };
+  } catch (error) {
+    return { data: mockDashboard, source: 'mock', error: readableError(error) };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchRuns() {
+  try {
+    const response = await fetch(`${API_URL}/api/runs`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    return data.runs || [];
+  } catch {
+    return [];
+  }
+}
+
+async function responseError(response) {
+  let detail = '';
+  try {
+    const data = await response.json();
+    detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || data);
+  } catch {
+    detail = await response.text().catch(() => '');
+  }
+  return new Error([`HTTP ${response.status}`, detail].filter(Boolean).join(': '));
+}
+
+function readableError(error) {
+  if (error?.name === 'AbortError') return `Request timed out calling ${API_URL}`;
+  return error?.message || 'Request failed';
 }
 
 function normalizeDashboard(data) {
@@ -115,7 +164,11 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState(mockDashboard.agents[0].id);
   const [command, setCommand] = useState('');
-  const [summonStatus, setSummonStatus] = useState('');
+  const [actionState, setActionState] = useState(null);
+  const [activePage, setActivePage] = useState('overview');
+  const [runs, setRuns] = useState([]);
+  const [lastRun, setLastRun] = useState(null);
+  const [lastToolRun, setLastToolRun] = useState(null);
 
   useEffect(() => {
     let alive = true;
@@ -124,6 +177,12 @@ function App() {
       setDashboard(result.data);
       setSource(result.source);
       setSelectedAgentId(result.data.agents[0]?.id || mockDashboard.agents[0].id);
+      if (result.error) {
+        setActionState({ status: 'failed', message: `Backend unavailable: ${result.error}` });
+      }
+    });
+    fetchRuns().then((items) => {
+      if (alive) setRuns(items);
     });
     return () => { alive = false; };
   }, []);
@@ -137,102 +196,226 @@ function App() {
     const result = await fetchDashboard();
     setDashboard(result.data);
     setSource(result.source);
+    if (result.error) {
+      setActionState({ status: 'failed', message: `Backend unavailable: ${result.error}` });
+    }
+    setRuns(await fetchRuns());
+    return result;
   }
 
   async function handleSummon(event) {
     event.preventDefault();
     const message = command.trim() || 'Open the AgentOps dashboard and check connected tools.';
-    setSummonStatus('running');
+    setActionState({ status: 'running', message: 'Creating a local summon run...' });
     try {
       const response = await fetch(API_URL + '/api/summon', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source: 'dashboard', message, metadata: { ui: true } })
       });
-      if (!response.ok) throw new Error('HTTP ' + response.status);
+      if (!response.ok) throw await responseError(response);
+      const run = await response.json();
       setCommand('');
-      setSummonStatus('completed');
+      setLastRun(run);
+      setLastToolRun(null);
       await refreshDashboard();
-    } catch {
-      setSummonStatus('failed');
+      setActionState({ status: 'completed', message: `Summon completed: ${run.id}` });
+    } catch (error) {
+      setActionState({ status: 'failed', message: `Summon failed: ${readableError(error)}` });
     }
   }
 
   async function executeTool(toolId) {
-    setSummonStatus('running');
+    setActionState({ status: 'running', message: `Running ${toolId} through the backend...` });
     try {
       const response = await fetch(API_URL + '/api/tools/' + toolId + '/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ payload: {} })
       });
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      setSummonStatus('completed');
+      if (!response.ok) throw await responseError(response);
+      const run = await response.json();
+      setLastToolRun(run);
       await refreshDashboard();
-    } catch {
-      setSummonStatus('failed');
+      const message = run.status === 'completed'
+        ? `${toolId} completed.`
+        : `${toolId} could not run: ${run.error || 'tool returned an error'}`;
+      setActionState({ status: run.status === 'completed' ? 'completed' : 'failed', message });
+    } catch (error) {
+      setActionState({ status: 'failed', message: `${toolId} failed: ${readableError(error)}` });
     }
+  }
+
+  function navigateToPage(pageId) {
+    setActivePage(pageId);
+    setSidebarOpen(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   return (
     <div className="shell">
-      <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      <Sidebar open={sidebarOpen} activePage={activePage} onNavigate={navigateToPage} onClose={() => setSidebarOpen(false)} />
       <main className="main-frame">
-        <TopBar onMenu={() => setSidebarOpen(true)} source={source} />
-        <section className="hero-grid">
-          <div className="command-panel reveal">
-            <div className="eyebrow"><RadioTower size={16} /> Personal AgentOS / Jarvis</div>
-            <h1>AgentOps command center for your personal AI workforce.</h1>
-            <p>Monitor live agents, inspect runs, track cost pressure, and keep the daily operating loop visible.</p>
-            <form className="summon-bar" onSubmit={handleSummon}>
-              <Command size={20} />
-              <span className="prompt">Summon:</span>
-              <input aria-label="Summon command" placeholder="check gmail, brief me, route tasks..." value={command} onChange={(event) => setCommand(event.target.value)} />
-              <button type="submit"><Sparkles size={18} /> Execute</button>
-            </form>
-            {summonStatus && <div className={'action-state ' + summonStatus}>{summonStatus}</div>}
-          </div>
-          <RunDetail run={dashboard.run} />
-        </section>
-        <MetricStrip metrics={dashboard.metrics} />
-        <section className="content-grid">
-          <div className="panel agents-panel reveal">
-            <PanelHeader icon={Bot} title="Active Agents" action="Fleet health" />
-            <div className="agents-grid">
-              {dashboard.agents.map((agent) => (
-                <AgentCard key={agent.id} agent={agent} active={agent.id === selectedAgent?.id} onClick={() => setSelectedAgentId(agent.id)} />
-              ))}
-            </div>
-          </div>
-          <div className="panel reveal">
-            <PanelHeader icon={Clock3} title="Running Task Timeline" action="Live trace" />
-            <Timeline items={dashboard.timeline} />
-          </div>
-        </section>
-        <section className="lower-grid">
-          <Briefing briefing={dashboard.briefing} />
-          <ToolPanel tools={dashboard.tools} onExecute={executeTool} />
-          <AgentInspector agent={selectedAgent} />
-        </section>
+        <TopBar onMenu={() => setSidebarOpen(true)} source={source} apiUrl={API_URL} />
+        {activePage === 'overview' && (
+          <OverviewPage
+            dashboard={dashboard}
+            command={command}
+            actionState={actionState}
+            lastRun={lastRun}
+            lastToolRun={lastToolRun}
+            onCommandChange={setCommand}
+            onSummon={handleSummon}
+            onExecute={executeTool}
+            selectedAgent={selectedAgent}
+            onSelectAgent={setSelectedAgentId}
+          />
+        )}
+        {activePage === 'agents' && <AgentsPage agents={dashboard.agents} selectedAgent={selectedAgent} onSelectAgent={setSelectedAgentId} />}
+        {activePage === 'runs' && <RunsPage run={dashboard.run} timeline={dashboard.timeline} runs={runs} />}
+        {activePage === 'briefing' && <Briefing briefing={dashboard.briefing} />}
+        {activePage === 'integrations' && (
+          <section className="page-stack">
+            <ToolPanel tools={dashboard.tools} onExecute={executeTool} />
+            {actionState && <div className={'action-state ' + actionState.status}>{actionState.message}</div>}
+            {lastToolRun && <ToolResultPanel toolRun={lastToolRun} />}
+          </section>
+        )}
+        {activePage === 'approvals' && <ApprovalPanel tools={dashboard.tools} />}
       </main>
     </div>
   );
 }
 
-function Sidebar({ open, onClose }) {
+function OverviewPage({ dashboard, command, actionState, lastRun, lastToolRun, onCommandChange, onSummon, onExecute, selectedAgent, onSelectAgent }) {
+  return (
+    <>
+      <section className="hero-grid">
+        <div className="command-panel reveal">
+          <div className="eyebrow"><RadioTower size={16} /> Personal AgentOS / Jarvis</div>
+          <h1>AgentOps command center for your personal AI workforce.</h1>
+          <p>Monitor live agents, inspect runs, track cost pressure, and keep the daily operating loop visible.</p>
+          <form className="summon-bar" onSubmit={onSummon}>
+            <Command size={20} />
+            <span className="prompt">Summon:</span>
+            <input aria-label="Summon command" placeholder="check gmail, brief me, route tasks..." value={command} onChange={(event) => onCommandChange(event.target.value)} />
+            <button type="submit"><Sparkles size={18} /> Execute</button>
+          </form>
+          {actionState && <div className={'action-state ' + actionState.status}>{actionState.message}</div>}
+        </div>
+        <RunDetail run={dashboard.run} />
+      </section>
+      {(lastRun || lastToolRun) && <JarvisOutput run={lastRun} toolRun={lastToolRun} />}
+      <MetricStrip metrics={dashboard.metrics} />
+      <section className="content-grid">
+        <AgentsPanel agents={dashboard.agents} selectedAgent={selectedAgent} onSelectAgent={onSelectAgent} />
+        <TimelinePanel items={dashboard.timeline} />
+      </section>
+      <section className="lower-grid">
+        <Briefing briefing={dashboard.briefing} />
+        <ToolPanel tools={dashboard.tools} onExecute={onExecute} />
+        <AgentInspector agent={selectedAgent} />
+      </section>
+    </>
+  );
+}
+
+function JarvisOutput({ run, toolRun }) {
+  const executeStep = run?.steps?.find((step) => step.name === 'execute workers');
+  const selectedTools = executeStep?.output?.selected_composio_tools || [];
+  const toolResults = executeStep?.output?.tool_results || [];
+  return (
+    <section className="panel jarvis-output reveal">
+      <PanelHeader icon={Sparkles} title="Jarvis Output" action={run ? run.status : toolRun?.status} />
+      {run && (
+        <div className="output-summary">
+          <strong>{run.summary}</strong>
+          <span>{run.message}</span>
+        </div>
+      )}
+      {!!selectedTools.length && (
+        <div className="output-chips">
+          {selectedTools.map((tool) => <span key={tool.id}>{tool.id}</span>)}
+        </div>
+      )}
+      {toolResults.map((result) => <ToolResultPanel key={result.id} toolRun={result} />)}
+      {toolRun && <ToolResultPanel toolRun={toolRun} />}
+      {run && !toolResults.length && <p>Jarvis completed the internal graph. Ask for Gmail, unread email, or follow-ups to trigger Composio.</p>}
+    </section>
+  );
+}
+
+function ToolResultPanel({ toolRun }) {
+  const messages = toolRun?.output?.data?.messages || [];
+  const artifactPath = toolRun?.output?.outputFilePath;
+  return (
+    <div className="tool-result">
+      <div className="tool-result-head">
+        <strong>{toolRun.tool_id}</strong>
+        <span className={toolRun.status}>{toolRun.status}</span>
+      </div>
+      {toolRun.error && <p>{toolRun.error}</p>}
+      {!!messages.length && (
+        <div className="message-list">
+          {messages.slice(0, 5).map((message) => (
+            <article key={message.messageId || `${message.sender}-${message.subject}`}>
+              <strong>{message.subject || '(no subject)'}</strong>
+              <span>{message.sender}</span>
+              {message.preview?.body && <p>{message.preview.body}</p>}
+            </article>
+          ))}
+        </div>
+      )}
+      {artifactPath && <p>Composio returned a large result and stored it at {artifactPath}</p>}
+      {!messages.length && !artifactPath && !toolRun.error && <p>Tool completed. No message preview was returned.</p>}
+    </div>
+  );
+}
+
+function AgentsPage({ agents, selectedAgent, onSelectAgent }) {
+  return (
+    <section className="page-stack">
+      <PageHeader icon={Bot} title="Agents" detail="Live backend agent registry and selected agent telemetry." />
+      <AgentsPanel agents={agents} selectedAgent={selectedAgent} onSelectAgent={onSelectAgent} />
+      <AgentInspector agent={selectedAgent} />
+    </section>
+  );
+}
+
+function RunsPage({ run, timeline, runs }) {
+  return (
+    <section className="page-stack">
+      <PageHeader icon={Workflow} title="Runs" detail="Persisted summon runs from the backend." />
+      <div className="content-grid">
+        <RunDetail run={run} />
+        <TimelinePanel items={timeline} />
+      </div>
+      <RunList runs={runs} />
+    </section>
+  );
+}
+
+function Sidebar({ open, activePage, onNavigate, onClose }) {
   const items = [
-    { icon: LayoutDashboard, label: 'Overview', active: true },
-    { icon: Bot, label: 'Agents' },
-    { icon: Workflow, label: 'Runs' },
-    { icon: Newspaper, label: 'Briefing' },
-    { icon: ServerCog, label: 'Integrations' },
-    { icon: ShieldCheck, label: 'Approvals' }
+    { id: 'overview', icon: LayoutDashboard, label: 'Overview' },
+    { id: 'agents', icon: Bot, label: 'Agents' },
+    { id: 'runs', icon: Workflow, label: 'Runs' },
+    { id: 'briefing', icon: Newspaper, label: 'Briefing' },
+    { id: 'integrations', icon: ServerCog, label: 'Integrations' },
+    { id: 'approvals', icon: ShieldCheck, label: 'Approvals' }
   ];
   return (
     <>
       <aside className={`sidebar ${open ? 'open' : ''}`}>
         <div className="brand"><div className="brand-mark"><Cpu size={22} /></div><div><strong>AgentOS</strong><span>JARVIS OPS</span></div></div>
-        <nav>{items.map((item) => (<a className={item.active ? 'active' : ''} href="#" key={item.label}><item.icon size={19} /><span>{item.label}</span></a>))}</nav>
+        <nav>
+          {items.map((item) => (
+            <button className={activePage === item.id ? 'active' : ''} type="button" key={item.id} onClick={() => onNavigate(item.id)}>
+              <item.icon size={19} />
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
         <div className="sidebar-footer"><div className="pulse-dot" /><span>Control plane stable</span></div>
       </aside>
       {open && <button className="backdrop" aria-label="Close navigation" onClick={onClose} />}
@@ -240,15 +423,15 @@ function Sidebar({ open, onClose }) {
   );
 }
 
-function TopBar({ onMenu, source }) {
+function TopBar({ onMenu, source, apiUrl }) {
   return (
     <header className="topbar">
       <button className="icon-button mobile-only" type="button" onClick={onMenu} aria-label="Open navigation"><Menu size={21} /></button>
-      <div className="topbar-search"><Search size={18} /><span>Search agents, runs, memories, approvals</span></div>
+      <div className="topbar-search"><Search size={18} /><span>{apiUrl}</span></div>
       <div className="topbar-actions">
         <span className={`source-pill ${source}`}>{source === 'backend' ? 'API online' : 'Mock mode'}</span>
-        <button className="icon-button" type="button" aria-label="Notifications"><BellRing size={19} /></button>
-        <button className="icon-button" type="button" aria-label="Open command"><TerminalSquare size={19} /></button>
+        <button className="icon-button" type="button" aria-label="Notifications" title="Placeholder: notifications are not wired yet"><BellRing size={19} /></button>
+        <button className="icon-button" type="button" aria-label="Open command" title="Placeholder: command palette is not wired yet"><TerminalSquare size={19} /></button>
       </div>
     </header>
   );
@@ -264,6 +447,38 @@ function MetricStrip({ metrics }) {
         </article>
       ))}
     </section>
+  );
+}
+
+function PageHeader({ icon: Icon, title, detail }) {
+  return (
+    <section className="page-header">
+      <div className="eyebrow"><Icon size={16} /> {title}</div>
+      <h1>{title}</h1>
+      <p>{detail}</p>
+    </section>
+  );
+}
+
+function AgentsPanel({ agents, selectedAgent, onSelectAgent }) {
+  return (
+    <div className="panel agents-panel reveal">
+      <PanelHeader icon={Bot} title="Active Agents" action="Fleet health" />
+      <div className="agents-grid">
+        {agents.map((agent) => (
+          <AgentCard key={agent.id} agent={agent} active={agent.id === selectedAgent?.id} onClick={() => onSelectAgent(agent.id)} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TimelinePanel({ items }) {
+  return (
+    <div className="panel reveal">
+      <PanelHeader icon={Clock3} title="Running Task Timeline" action="Live trace" />
+      <Timeline items={items} />
+    </div>
   );
 }
 
@@ -287,9 +502,29 @@ function Timeline({ items }) {
   return <div className="timeline">{items.map((item) => (<article className="timeline-item" key={`${item.time}-${item.title}`}><time>{item.time}</time><div className={`timeline-pin ${item.status}`} /><div><strong>{item.title}</strong><span>{item.agent}</span><p>{item.detail}</p></div></article>))}</div>;
 }
 
+function RunList({ runs }) {
+  return (
+    <section className="panel run-list-panel reveal">
+      <PanelHeader icon={Workflow} title="Run History" action={`${runs.length} stored`} />
+      <div className="run-list">
+        {runs.map((item) => (
+          <article key={item.id}>
+            <div>
+              <strong>{item.message}</strong>
+              <span>{item.source} / {item.created_at?.replace('T', ' ').slice(0, 16)}</span>
+            </div>
+            <small className={item.status}>{item.status}</small>
+          </article>
+        ))}
+        {!runs.length && <p>No backend runs yet. Use Execute from Overview to create one.</p>}
+      </div>
+    </section>
+  );
+}
+
 function Briefing({ briefing }) {
   return (
-    <section className="panel briefing-panel reveal">
+    <section className="panel briefing-panel reveal dashboard-section" id="briefing">
       <PanelHeader icon={Newspaper} title="Daily Briefing" action="News / reminders / follow-ups" />
       <div className="briefing-grid">
         <BriefingColumn icon={RadioTower} title="Signal" items={briefing.news} />
@@ -311,7 +546,7 @@ function ToolPanel({ tools, onExecute }) {
   const available = tools?.available;
   const recentRuns = tools?.recent_runs || [];
   return (
-    <section className="panel tool-panel reveal">
+    <section className="panel tool-panel reveal dashboard-section" id="integrations">
       <PanelHeader icon={ServerCog} title="Composio Tools" action={available ? 'CLI connected' : 'CLI offline'} />
       <div className={'tool-status ' + (available ? 'online' : 'offline')}>
         <span>{available ? 'Connected' : 'Waiting for local Composio CLI'}</span>
@@ -324,8 +559,8 @@ function ToolPanel({ tools, onExecute }) {
               <strong>{tool.name}</strong>
               <span>{tool.description}</span>
             </div>
-            <button type="button" onClick={() => onExecute(tool.id)} disabled={!available}>
-              <Zap size={15} /> Run
+            <button type="button" onClick={() => onExecute(tool.id)} title={available ? `Run ${tool.name}` : 'Run a backend check and record why Composio is unavailable'}>
+              <Zap size={15} /> {available ? 'Run' : 'Check'}
             </button>
           </article>
         ))}
@@ -339,6 +574,25 @@ function ToolPanel({ tools, onExecute }) {
           </div>
         ))}
         {!recentRuns.length && <p>No Composio tool runs yet.</p>}
+      </div>
+    </section>
+  );
+}
+
+function ApprovalPanel({ tools }) {
+  const readOnlyTools = (tools?.tools || []).filter((tool) => !tool.mutating);
+  return (
+    <section className="panel approvals-panel reveal dashboard-section" id="approvals">
+      <PanelHeader icon={ShieldCheck} title="Approvals" action="Safety gates" />
+      <div className="approval-grid">
+        <div>
+          <strong>Read-only tools can run from Jarvis</strong>
+          <span>{readOnlyTools.length} Composio tools currently allowed: {readOnlyTools.map((tool) => tool.id).join(', ') || 'none'}</span>
+        </div>
+        <div>
+          <strong>Mutating tools require explicit approval</strong>
+          <span>Email sends, calendar writes, payments, or repo changes should stay blocked until an approval flow is added.</span>
+        </div>
       </div>
     </section>
   );

@@ -108,28 +108,54 @@ h1, h2, h3, p { margin-top: 0; }
 
 .sidebar nav { display: grid; gap: 8px; }
 
-.sidebar a {
+.sidebar button {
   display: flex;
   align-items: center;
   gap: 12px;
+  width: 100%;
   min-height: 44px;
   padding: 0 13px;
   color: var(--muted);
-  text-decoration: none;
   border: 1px solid transparent;
   border-left: 3px solid transparent;
   background: transparent;
+  cursor: pointer;
   transition: all 0.2s ease;
 }
 
-.sidebar a:hover,
-.sidebar a:focus-visible,
-.sidebar a.active {
+.sidebar button:hover,
+.sidebar button:focus-visible,
+.sidebar button.active {
   color: var(--text);
   border-color: var(--border);
   border-left-color: var(--accent);
   background: rgba(0, 229, 255, 0.07);
   outline: none;
+}
+
+.dashboard-section {
+  scroll-margin-top: 22px;
+}
+
+.page-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.page-header {
+  padding: 22px 0 4px;
+}
+
+.page-header h1 {
+  margin-bottom: 8px;
+  font-size: 2.4rem;
+  line-height: 1;
+}
+
+.page-header p {
+  max-width: 760px;
+  color: var(--muted);
+  line-height: 1.55;
 }
 
 .sidebar-footer {
@@ -246,6 +272,7 @@ h1, h2, h3, p { margin-top: 0; }
   border: 1px solid rgba(0, 229, 255, 0.18);
   transform: rotate(35deg);
   box-shadow: inset 0 0 60px rgba(0, 229, 255, 0.06);
+  pointer-events: none;
 }
 
 .eyebrow {
@@ -289,7 +316,7 @@ h1 {
 .action-state {
   position: relative;
   z-index: 1;
-  width: fit-content;
+  width: min(100%, 760px);
   margin-top: 12px;
   padding: 7px 10px;
   border: 1px solid var(--border);
@@ -297,6 +324,7 @@ h1 {
   font-family: var(--mono);
   font-size: 0.72rem;
   text-transform: uppercase;
+  line-height: 1.5;
   background: rgba(255, 255, 255, 0.035);
 }
 
@@ -487,6 +515,94 @@ h1 {
 
 .metric-card.ok { box-shadow: inset 3px 0 0 var(--green), var(--shadow); }
 .metric-card.warn { box-shadow: inset 3px 0 0 var(--amber), var(--shadow); }
+
+.jarvis-output {
+  margin-top: 18px;
+}
+
+.output-summary strong,
+.output-summary span {
+  display: block;
+}
+
+.output-summary strong {
+  margin-bottom: 6px;
+}
+
+.output-summary span,
+.jarvis-output p,
+.tool-result p,
+.message-list span {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.output-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.output-chips span {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+
+.tool-result {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.tool-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tool-result-head span {
+  color: var(--green);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.tool-result-head span.error {
+  color: var(--amber);
+}
+
+.message-list {
+  display: grid;
+  gap: 8px;
+}
+
+.message-list article {
+  padding: 10px;
+  border: 1px solid rgba(128, 224, 255, 0.1);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.message-list strong,
+.message-list span {
+  display: block;
+}
+
+.message-list strong {
+  margin-bottom: 4px;
+}
+
+.message-list p {
+  margin: 7px 0 0;
+}
 
 .content-grid,
 .lower-grid {
@@ -773,6 +889,71 @@ h1 {
 
 .tool-runs span.completed { color: var(--green); }
 .tool-runs span.error { color: var(--amber); }
+
+.run-list {
+  display: grid;
+  gap: 10px;
+}
+
+.run-list article {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.run-list strong,
+.run-list span {
+  display: block;
+}
+
+.run-list strong {
+  margin-bottom: 5px;
+}
+
+.run-list span,
+.run-list p {
+  color: var(--muted);
+}
+
+.run-list small {
+  color: var(--green);
+  font-family: var(--mono);
+  text-transform: uppercase;
+}
+
+.approvals-panel {
+  margin-top: 18px;
+}
+
+.approval-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.approval-grid div {
+  padding: 14px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.approval-grid strong,
+.approval-grid span {
+  display: block;
+}
+
+.approval-grid strong {
+  margin-bottom: 7px;
+}
+
+.approval-grid span {
+  color: var(--muted);
+  line-height: 1.5;
+}
 
 .inspector-core {
   display: grid;

@@ -153,8 +153,16 @@ def test_summon_can_call_matching_read_only_composio_tool(tmp_path, monkeypatch)
 
     assert response.status_code == 201
     run = response.json()
+    intake_step = next(step for step in run["steps"] if step["name"] == "intake")
+    plan_step = next(step for step in run["steps"] if step["name"] == "plan")
+    route_step = next(step for step in run["steps"] if step["name"] == "route")
     execute_step = next(step for step in run["steps"] if step["name"] == "execute workers")
+    assert intake_step["output"]["selected_composio_tools"][0]["id"] == "gmail.search_unread"
+    assert plan_step["output"]["selected_composio_tools"][0]["id"] == "gmail.search_unread"
+    assert route_step["output"]["selected_composio_tools"][0]["id"] == "gmail.search_unread"
     assert execute_step["output"]["tool_results"][0]["status"] == "completed"
+    assert execute_step["output"]["selected_composio_tools"][0]["id"] == "gmail.search_unread"
+    assert "gmail.search_unread" in run["summary"]
 
 
 def test_missing_run_returns_404(tmp_path):

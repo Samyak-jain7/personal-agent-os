@@ -88,11 +88,21 @@ READ_ONLY_COMPOSIO_TOOLS = [
         "default_payload": {
             "query": "newer_than:7d",
             "max_results": 5,
-            "include_payload": True,
-            "verbose": True,
+            "include_payload": False,
+            "verbose": False,
             "user_id": "me",
         },
-        "triggers": ["email", "gmail", "inbox", "mail"],
+        "triggers": [
+            "email",
+            "emails",
+            "gmail",
+            "inbox",
+            "mail",
+            "fetch gmail",
+            "read gmail",
+            "check gmail",
+            "check my gmail",
+        ],
         "mutating": False,
     },
     {
@@ -102,12 +112,21 @@ READ_ONLY_COMPOSIO_TOOLS = [
         "description": "Read unread Gmail messages that may need follow-up.",
         "default_payload": {
             "query": "is:unread newer_than:14d",
-            "max_results": 10,
-            "include_payload": True,
-            "verbose": True,
+            "max_results": 5,
+            "include_payload": False,
+            "verbose": False,
             "user_id": "me",
         },
-        "triggers": ["unread", "follow up", "follow-up"],
+        "triggers": [
+            "unread",
+            "follow up",
+            "follow-up",
+            "followups",
+            "follow-ups",
+            "unread email",
+            "unread emails",
+            "unread gmail",
+        ],
         "mutating": False,
     },
 ]
@@ -411,12 +430,25 @@ class ComposioToolRunner:
     def list_tools(self) -> list[dict[str, Any]]:
         return list(self._tools.values())
 
-    def tool_for_message(self, message: str) -> dict[str, Any] | None:
+    def tools_for_message(self, message: str) -> list[dict[str, Any]]:
         lowered = message.lower()
+        matches = []
         for tool in self._tools.values():
             if any(trigger in lowered for trigger in tool["triggers"]):
-                return tool
-        return None
+                matches.append(tool)
+        match_ids = {tool["id"] for tool in matches}
+        specific_unread_requested = "gmail.search_unread" in match_ids
+        broad_fetch_requested = any(
+            term in lowered
+            for term in ("all email", "all emails", "all gmail", "recent email", "recent emails", "recent gmail")
+        )
+        if specific_unread_requested and not broad_fetch_requested:
+            matches = [tool for tool in matches if tool["id"] != "gmail.fetch"]
+        return matches
+
+    def tool_for_message(self, message: str) -> dict[str, Any] | None:
+        tools = self.tools_for_message(message)
+        return tools[0] if tools else None
 
     def execute(self, tool_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if os.getenv("COMPOSIO_ENABLED", "1") == "0":
@@ -565,26 +597,46 @@ class Orchestrator:
     def _step_output(self, step: StepDefinition, state: dict[str, Any]) -> dict[str, Any]:
         message = state["message"]
         if step.name == "intake":
+            selected_tools = self.tools.tools_for_message(message)
             return {
                 "accepted": True,
                 "source": state["source"],
                 "message_preview": message[:160],
+                "composio_available": self.tools.status()["available"],
+                "selected_composio_tools": [
+                    {"id": tool["id"], "name": tool["name"], "action": tool["action"]}
+                    for tool in selected_tools
+                ],
             }
         if step.name == "plan":
+            selected_tools = self.tools.tools_for_message(message)
+            plan = [
+                "understand request",
+                "choose relevant agents",
+                "execute deterministic worker pass",
+            ]
+            if selected_tools:
+                plan.append(
+                    "run selected read-only Composio tools: "
+                    + ", ".join(tool["id"] for tool in selected_tools)
+                )
+            plan.append("return synthesized status")
             return {
-                "plan": [
-                    "understand request",
-                    "choose relevant agents",
-                    "execute deterministic worker pass",
-                    "return synthesized status",
-                ]
+                "plan": plan,
+                "selected_composio_tools": [
+                    {"id": tool["id"], "name": tool["name"], "action": tool["action"]}
+                    for tool in selected_tools
+                ],
             }
         if step.name == "route":
             routed = ["Jarvis Orchestrator"]
             lowered = message.lower()
+            selected_tools = self.tools.tools_for_message(message)
             if any(term in lowered for term in ("news", "trend", "brief")):
                 routed.append("News Scout")
             if any(term in lowered for term in ("remind", "deadline", "schedule")):
+                routed.append("Reminder Sentinel")
+            if selected_tools and "Reminder Sentinel" not in routed:
                 routed.append("Reminder Sentinel")
             if any(term in lowered for term in ("build", "bug", "code", "project")):
                 routed.append("Project Engineer")
@@ -592,20 +644,43 @@ class Orchestrator:
                 routed.append("Research Analyst")
             if len(routed) == 1:
                 routed.append("Research Analyst")
-            return {"routed_agents": routed}
-        if step.name == "execute workers":
-            tool = self.tools.tool_for_message(message)
-            tool_result = None
-            if tool:
-                tool_result = self.tools.execute(tool["id"])
             return {
-                "result": "Workers executed with real Composio tools when a matching read-only tool was requested.",
-                "tool_results": [tool_result] if tool_result else [],
-                "side_effects": ["composio.read"] if tool_result else [],
+                "routed_agents": routed,
+                "selected_composio_tools": [
+                    {"id": tool["id"], "name": tool["name"], "action": tool["action"]}
+                    for tool in selected_tools
+                ],
             }
+        if step.name == "execute workers":
+            selected_tools = self.tools.tools_for_message(message)
+            tool_results = [self.tools.execute(tool["id"]) for tool in selected_tools]
+            return {
+                "result": "Jarvis executed selected read-only Composio tools during the worker pass."
+                if tool_results
+                else "Jarvis completed the worker pass without a matching Composio tool request.",
+                "selected_composio_tools": [
+                    {"id": tool["id"], "name": tool["name"], "action": tool["action"]}
+                    for tool in selected_tools
+                ],
+                "tool_results": tool_results,
+                "side_effects": ["composio.read"] if tool_results else [],
+            }
+        selected_tools = self.tools.tools_for_message(message)
+        tool_suffix = (
+            " with Composio tools " + ", ".join(tool["id"] for tool in selected_tools)
+            if selected_tools
+            else ""
+        )
         return {
-            "summary": f"Summon processed through {len(self.steps)} steps for source '{state['source']}'.",
+            "summary": (
+                f"Summon processed through {len(self.steps)} steps for source "
+                f"'{state['source']}'{tool_suffix}."
+            ),
             "mode": "langgraph" if LANGGRAPH_AVAILABLE else "internal_state_graph",
+            "selected_composio_tools": [
+                {"id": tool["id"], "name": tool["name"], "action": tool["action"]}
+                for tool in selected_tools
+            ],
         }
 
 
